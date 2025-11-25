@@ -1,0 +1,132 @@
+-- Calculate average goals per match between 1900-01-01 and 2000-12-31
+SELECT
+  AVG(home_score + away_score) AS avg_goals_per_game  -- average of total goals per match
+FROM matches
+WHERE date BETWEEN '1900-01-01' AND '2000-12-31';    -- only include matches in this date range
+
+-- Count how many shootout wins each country (winner) has, listed alphabetically
+SELECT
+  winner AS country,     -- take the winner field and call it country in the results
+  COUNT(*) AS shootout_wins  -- count rows (one row per shootout) per country
+FROM shootouts
+GROUP BY winner          -- group rows by the winner so COUNT() is computed per country
+ORDER BY winner ASC;     -- sort the final results alphabetically by country name
+
+-- Create a reliable key to join the tables
+SELECT *
+FROM matches m
+LEFT JOIN goals g       -- lEFT JOIN means taking everything even without results
+  ON g.date = m.date
+ AND g.home_team = m.home_team
+ AND g.away_team = m.away_team
+LEFT JOIN shootouts s
+  ON s.date = m.date
+ AND s.home_team = m.home_team
+ AND s.away_team = m.away_team;
+
+-- Select the shootout winner and match details
+SELECT 
+    s.winner,         -- The team that won the penalty shootout
+    m.date,           -- Match date
+    m.home_team,      -- Home team
+    m.away_team       -- Away team
+FROM matches m
+
+-- Join the shootouts table to the matches table
+-- We join on date + home_team + away_team because these uniquely identify a match.
+JOIN shootouts s
+  ON m.date = s.date               -- Match date must match
+ AND m.home_team = s.home_team     -- Home team must match
+ AND m.away_team = s.away_team     -- Away team must match
+
+-- We only want matches that ended exactly 1–1 before the shootout
+WHERE m.home_score = 1
+  AND m.away_score = 1;
+
+-- First CTE: calculate total goals scored by each player in each tournament
+WITH Player_Stats AS (
+    SELECT 
+        m.tournament,        -- Tournament name
+        g.scorer,            -- Player who scored the goal
+        COUNT(*) AS player_goals  -- Total goals that player scored in that tournament
+    FROM matches m
+    -- Join the goals table to matches, using the 3-key combination
+    -- This ensures each goal is correctly tied to its match
+    JOIN goals g 
+      ON m.date = g.date 
+     AND m.home_team = g.home_team 
+     AND m.away_team = g.away_team
+    GROUP BY m.tournament, g.scorer  -- Group so we can COUNT goals for each player
+),
+
+-- Second CTE: Rank the players within each tournament
+Ranked_Stats AS (
+    SELECT 
+        tournament,
+        scorer,
+        player_goals,
+
+        -- Window function: sum of all goals in each tournament
+        SUM(player_goals) OVER (
+            PARTITION BY tournament     -- restart the total per tournament
+        ) AS total_goals,
+
+        -- Window function: rank players by goals (1 = highest)
+        RANK() OVER (
+            PARTITION BY tournament
+            ORDER BY player_goals DESC  -- highest goals get rank 1
+        ) AS ranking
+    FROM Player_Stats
+)
+
+-- Final query: Return only the top scorers (rank = 1)
+SELECT 
+    tournament,
+    scorer,
+    player_goals,
+    -- Calculate percentage share of all tournament goals
+    ROUND((player_goals * 100.0 / total_goals), 2) AS percent_share
+FROM Ranked_Stats
+WHERE ranking = 1;  -- Only keep top-scorers
+
+-- Data quality 
+SELECT
+    date,
+    home_team,
+    away_team,
+    home_score,
+    away_score,
+
+    -- Data quality audit column
+    CASE
+        WHEN home_team IS NULL OR away_team IS NULL 
+            THEN 'Critical: Missing Team Name'  -- Missing important data
+
+        WHEN home_score < 0 OR away_score < 0 
+            THEN 'Error: Negative Score'        -- Score can't be negative
+
+        WHEN date > CURRENT_DATE 
+            THEN 'Warning: Future Date'         -- Match cannot be from the future
+
+        ELSE 'Valid'                            -- Everything looks good
+    END AS dq_flag
+
+FROM matches;
+
+-- Resolve
+SELECT DISTINCT
+    date,
+    COALESCE(home_team, 'Unknown') AS home_team,  -- Replace missing team names
+    COALESCE(away_team, 'Unknown') AS away_team,  -- Replace missing team names
+    
+    ABS(home_score) AS home_score,   -- Negative scores fixed using ABS()
+    ABS(away_score) AS away_score,   -- Same here
+
+    tournament, 
+    city, 
+    country
+
+FROM matches
+-- Remove future dates and ensure home_team is not fully missing
+WHERE date <= CURRENT_DATE 
+  AND home_team IS NOT NULL;
